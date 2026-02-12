@@ -2,13 +2,13 @@
 import Link from 'next/link';
 import dbConnect from '@/lib/db';
 import mongoose from 'mongoose';
-import { Camera, UserPlus, Database, Activity, ScanFace } from 'lucide-react';
+import { Camera, UserPlus, Database, ScanFace, FileText } from 'lucide-react';
 
 async function getDbStatus() {
   try {
     await dbConnect();
     return mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected';
-  } catch (e) {
+  } catch {
     return 'Error';
   }
 }
@@ -68,6 +68,16 @@ export default async function Home() {
                     Add Staff →
                 </div>
              </div>
+          </Link>
+        </div>
+
+        <div className="mb-10 flex justify-center">
+          <Link
+            href="/docs"
+            className="inline-flex items-center rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm transition hover:border-blue-300 hover:text-blue-700"
+          >
+            <FileText className="mr-2 h-4 w-4" suppressHydrationWarning />
+            Open API Docs (/docs)
           </Link>
         </div>
 

@@ -1,21 +1,11 @@
 
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/db';
-import { User, IUser } from '@/models/User';
+import { User } from '@/models/User';
+import { findBestFaceMatch, type FaceCandidate } from '@/lib/face-match';
 
 // Euclidean distance threshold for face matching
 const MATCH_THRESHOLD = 0.5;
-
-function getEuclideanDistance(descriptor1: number[], descriptor2: number[]): number {
-  if (descriptor1.length !== descriptor2.length) return 1.0;
-  
-  let sum = 0;
-  for (let i = 0; i < descriptor1.length; i++) {
-    const diff = descriptor1[i] - descriptor2[i];
-    sum += diff * diff;
-  }
-  return Math.sqrt(sum);
-}
 
 export async function POST(req: Request) {
   try {
@@ -29,30 +19,12 @@ export async function POST(req: Request) {
       );
     }
 
-    const users = await User.find({});
-    
-    let bestMatchUser: IUser | null = null;
-    let minDistance = 1.0;
-
-    for (const user of users) {
-      if (user.faceDescriptors && Array.isArray(user.faceDescriptors)) {
-          // Check against all descriptors for this user and find the best match (minimum distance)
-          let userMinDistance = 1.0;
-          
-          for (const storedDescriptor of user.faceDescriptors) {
-               const distance = getEuclideanDistance(faceDescriptor, storedDescriptor);
-               if (distance < userMinDistance) {
-                   userMinDistance = distance;
-               }
-          }
-
-          // If this user's best match is the global best so far, record it
-          if (userMinDistance < minDistance) {
-              minDistance = userMinDistance;
-              bestMatchUser = user;
-          }
-      }
-    }
+    const users = await User.find({})
+      .select('_id name role employeeId faceDescriptors')
+      .lean<FaceCandidate[]>();
+    const match = findBestFaceMatch(faceDescriptor, users);
+    const bestMatchUser = match.user;
+    const minDistance = match.distance;
 
     if (!bestMatchUser || minDistance > MATCH_THRESHOLD) {
       return NextResponse.json(
@@ -73,10 +45,11 @@ export async function POST(req: Request) {
       score: matchScore
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Identify Error:', error);
+    const message = error instanceof Error ? error.message : 'Internal Server Error';
     return NextResponse.json(
-      { error: error.message || 'Internal Server Error' },
+      { error: message },
       { status: 500 }
     );
   }

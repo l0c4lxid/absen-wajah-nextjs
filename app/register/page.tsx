@@ -3,10 +3,11 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { ArrowLeft, Briefcase, Camera, CheckCircle2, Hash, Loader2, RefreshCw, Save, User, UserPlus } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Briefcase, Camera, CheckCircle2, Hash, Loader2, RefreshCw, Save, User, UserPlus } from 'lucide-react';
 import BiometricFrame, { BiometricTone } from '@/components/BiometricFrame';
 import { averageDescriptor, QualityIssue } from '@/lib/biometric';
 import type { FrameAnalysis } from '@/components/FaceScanner';
+import UserCrudPanel from '@/components/UserCrudPanel';
 
 const FaceScanner = dynamic(() => import('@/components/FaceScanner'), { ssr: false });
 
@@ -40,6 +41,9 @@ export default function RegisterPage() {
   const [samplesCount, setSamplesCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [alert, setAlert] = useState<{ text: string; type: AlertType } | null>(null);
+  const [overwriteCandidate, setOverwriteCandidate] = useState<{ _id: string; name: string; role: string; employeeId: string } | null>(null);
+  const [employeeCheck, setEmployeeCheck] = useState<{ exists: boolean; name?: string } | null>(null);
+  const [usersRefreshKey, setUsersRefreshKey] = useState(0);
 
   const flowRef = useRef<RegisterFlow>('initializing');
   const sampleCollectionRef = useRef<Float32Array[]>([]);
@@ -142,28 +146,77 @@ export default function RegisterPage() {
         body: JSON.stringify({
           ...formData,
           faceDescriptors,
+          confirmOverwrite: Boolean(overwriteCandidate),
         }),
       });
 
       const data = await response.json();
       if (!response.ok) {
+        if (response.status === 409 && data.code === 'EMPLOYEE_EXISTS' && data.existingUser) {
+          setOverwriteCandidate(data.existingUser);
+          setAlert({
+            text: `Employee ID sudah terdaftar atas nama ${data.existingUser.name}. Klik Register lagi untuk overwrite.`,
+            type: 'warning',
+          });
+          return;
+        }
+        if (response.status === 409 && data.code === 'FACE_ALREADY_REGISTERED' && data.conflictUser) {
+          setAlert({
+            text: `Wajah mirip dengan user ${data.conflictUser.name} (${data.conflictUser.employeeId}) skor ${data.score}%. Batalkan untuk mencegah salah user.`,
+            type: 'error',
+          });
+          setOverwriteCandidate(null);
+          return;
+        }
         setAlert({ text: data.error ?? 'Registrasi gagal.', type: 'error' });
         return;
       }
 
       setAlert({ text: 'Wajah berhasil didaftarkan dan tersimpan di database.', type: 'success' });
+      setOverwriteCandidate(null);
       setFormData({ name: '', role: 'Doctor', employeeId: '' });
+      setEmployeeCheck(null);
       resetModeling('Posisikan wajah Anda di dalam kotak.');
       flowRef.current = 'initializing';
       setFlow('initializing');
       setPrompt('Menyiapkan kamera biometrik...');
       setProgress(0);
+      setUsersRefreshKey((prev) => prev + 1);
     } catch {
       setAlert({ text: 'Terjadi masalah jaringan saat menyimpan.', type: 'error' });
     } finally {
       setLoading(false);
     }
-  }, [flow, formData, resetModeling]);
+  }, [flow, formData, overwriteCandidate, resetModeling]);
+
+  const validateEmployeeId = useCallback(async (employeeId: string) => {
+    const normalized = employeeId.trim().toUpperCase();
+    if (!normalized) {
+      setEmployeeCheck(null);
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/user/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ employeeId: normalized }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setEmployeeCheck(null);
+        return;
+      }
+
+      setEmployeeCheck(
+        data.employeeExists && data.employee
+          ? { exists: true, name: data.employee.name }
+          : { exists: false }
+      );
+    } catch {
+      setEmployeeCheck(null);
+    }
+  }, []);
 
   const frameTone: BiometricTone = useMemo(() => {
     if (flow === 'finalized') return 'success';
@@ -271,11 +324,22 @@ export default function RegisterPage() {
                   type="text"
                   required
                   value={formData.employeeId}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, employeeId: e.target.value }))}
+                  onChange={(e) => {
+                    setFormData((prev) => ({ ...prev, employeeId: e.target.value }));
+                    setOverwriteCandidate(null);
+                  }}
+                  onBlur={(e) => {
+                    void validateEmployeeId(e.target.value);
+                  }}
                   className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-slate-900 outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
                   placeholder="EMP-0042"
                 />
               </div>
+              {employeeCheck?.exists && (
+                <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                  Employee ID ini sudah terdaftar atas nama <strong>{employeeCheck.name}</strong>. Submit akan membutuhkan konfirmasi overwrite.
+                </p>
+              )}
             </div>
 
             <button
@@ -299,6 +363,16 @@ export default function RegisterPage() {
                 </>
               )}
             </button>
+            {overwriteCandidate && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4" suppressHydrationWarning />
+                  <p>
+                    Mode overwrite aktif untuk <strong>{overwriteCandidate.name}</strong> ({overwriteCandidate.employeeId}). Klik Register Staff sekali lagi untuk lanjut.
+                  </p>
+                </div>
+              </div>
+            )}
           </form>
 
           {alert && (
@@ -319,6 +393,10 @@ export default function RegisterPage() {
           )}
         </section>
       </main>
+
+      <div className="mx-auto mt-2 max-w-6xl px-4 pb-8">
+        <UserCrudPanel refreshKey={usersRefreshKey} />
+      </div>
     </div>
   );
 }
