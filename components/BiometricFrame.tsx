@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 import { BIOMETRIC_FRAME } from '@/lib/biometric';
 
@@ -32,6 +32,27 @@ export default function BiometricFrame({
   pulse = false,
   className = '',
 }: BiometricFrameProps) {
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const update = () => {
+      setIsMobile(window.innerWidth < 520);
+    };
+    update();
+    window.addEventListener('resize', update, { passive: true });
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  const frameStyle = useMemo(() => {
+    const widthRatio = isMobile ? 0.72 : BIOMETRIC_FRAME.widthRatio;
+    const heightRatio = isMobile ? 0.74 : BIOMETRIC_FRAME.heightRatio;
+    return {
+      width: `${widthRatio * 100}%`,
+      height: `${heightRatio * 100}%`,
+      borderRadius: `${BIOMETRIC_FRAME.borderRadius}px`,
+    };
+  }, [isMobile]);
+
   return (
     <div className={`absolute inset-0 z-20 pointer-events-none flex flex-col items-center justify-center ${className}`}>
       <div
@@ -39,9 +60,7 @@ export default function BiometricFrame({
           pulse ? 'animate-[framePulse_1.8s_ease-in-out_infinite]' : ''
         }`}
         style={{
-          width: `${BIOMETRIC_FRAME.widthRatio * 100}%`,
-          height: `${BIOMETRIC_FRAME.heightRatio * 100}%`,
-          borderRadius: `${BIOMETRIC_FRAME.borderRadius}px`,
+          ...frameStyle,
           boxShadow: `${tone === 'success' ? '0 0 34px rgba(16,185,129,0.75), ' : ''}0 0 0 9999px rgba(2,6,23,0.55)`,
         }}
       >

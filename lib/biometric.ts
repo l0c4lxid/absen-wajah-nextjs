@@ -1,7 +1,7 @@
 export const BIOMETRIC_FRAME = {
-  widthRatio: 0.62,
-  heightRatio: 0.72,
-  borderRadius: 24,
+  widthRatio: 0.58,
+  heightRatio: 0.7,
+  borderRadius: 20,
 };
 
 export type QualityIssue =
@@ -21,8 +21,11 @@ export interface FrameRect {
 }
 
 export function getFrameRect(containerWidth: number, containerHeight: number): FrameRect {
-  const width = containerWidth * BIOMETRIC_FRAME.widthRatio;
-  const height = containerHeight * BIOMETRIC_FRAME.heightRatio;
+  const isMobile = containerWidth < 520;
+  const widthRatio = isMobile ? 0.72 : BIOMETRIC_FRAME.widthRatio;
+  const heightRatio = isMobile ? 0.74 : BIOMETRIC_FRAME.heightRatio;
+  const width = containerWidth * widthRatio;
+  const height = containerHeight * heightRatio;
   return {
     left: (containerWidth - width) / 2,
     top: (containerHeight - height) / 2,

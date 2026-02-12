@@ -24,12 +24,44 @@ export interface FrameAnalysis {
 }
 
 const MODELS_URL = '/models';
-const DETECT_INTERVAL_MS = 120;
+const DETECT_INTERVAL_MS = 160;
 
 const SSD_OPTIONS = new faceapi.SsdMobilenetv1Options({
-  minConfidence: 0.55,
+  minConfidence: 0.3,
   maxResults: 1,
 });
+
+const TINY_OPTIONS = new faceapi.TinyFaceDetectorOptions({
+  inputSize: 224,
+  scoreThreshold: 0.35,
+});
+
+interface RenderRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
+}
+
+function getRenderedVideoRect(videoWidth: number, videoHeight: number, canvasWidth: number, canvasHeight: number): RenderRect {
+  const scale = Math.min(canvasWidth / videoWidth, canvasHeight / videoHeight);
+  const width = videoWidth * scale;
+  const height = videoHeight * scale;
+  const x = (canvasWidth - width) / 2;
+  const y = (canvasHeight - height) / 2;
+
+  return { x, y, width, height, scale };
+}
+
+function mapBoxToCanvas(box: faceapi.Box, renderRect: RenderRect): faceapi.Box {
+  return new faceapi.Box({
+    x: box.x * renderRect.scale + renderRect.x,
+    y: box.y * renderRect.scale + renderRect.y,
+    width: box.width * renderRect.scale,
+    height: box.height * renderRect.scale,
+  });
+}
 
 function classifyQuality(args: {
   box: faceapi.Box;
@@ -46,22 +78,24 @@ function classifyQuality(args: {
   const frameRight = frame.left + frame.width;
   const frameBottom = frame.top + frame.height;
 
-  if (box.x < frameLeft || box.y < frameTop || box.x + box.width > frameRight || box.y + box.height > frameBottom) {
+  const faceCenterX = box.x + box.width / 2;
+  const faceCenterY = box.y + box.height / 2;
+  if (faceCenterX < frameLeft || faceCenterX > frameRight || faceCenterY < frameTop || faceCenterY > frameBottom) {
     issues.push('outside-frame');
   }
 
   const relativeSize = box.width / frame.width;
-  if (relativeSize < 0.34) {
+  if (relativeSize < 0.24) {
     issues.push('too-small');
   }
-  if (relativeSize > 0.86) {
+  if (relativeSize > 0.9) {
     issues.push('too-large');
   }
 
-  if (brightness < 62) {
+  if (brightness < 50) {
     issues.push('too-dark');
   }
-  if (brightness > 196) {
+  if (brightness > 214) {
     issues.push('too-bright');
   }
 
@@ -81,12 +115,8 @@ function classifyQuality(args: {
   const halfEyeDistance = Math.max(1, Math.abs(eyeDx) / 2);
   const yawRatio = Math.abs(noseTip.x - eyeCenterX) / halfEyeDistance;
 
-  if (rollDeg > 10 || yawRatio > 0.34) {
+  if (rollDeg > 15 || yawRatio > 0.45) {
     issues.push('look-straight');
-  }
-
-  if (score < 55) {
-    issues.push('no-face');
   }
 
   return { issues, brightness, score };
@@ -99,6 +129,8 @@ export default function FaceScanner({ onFrameAnalysis, active = true, className 
   const loopTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const noFaceFrameCountRef = useRef(0);
+  const preferTinyRef = useRef(false);
 
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -131,12 +163,15 @@ export default function FaceScanner({ onFrameAnalysis, active = true, className 
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
+    noFaceFrameCountRef.current = 0;
+    preferTinyRef.current = false;
   }, [stopLoop]);
 
   const loadModels = useCallback(async () => {
     try {
       await Promise.all([
         faceapi.nets.ssdMobilenetv1.loadFromUri(MODELS_URL),
+        faceapi.nets.tinyFaceDetector.loadFromUri(MODELS_URL),
         faceapi.nets.faceLandmark68Net.loadFromUri(MODELS_URL),
         faceapi.nets.faceRecognitionNet.loadFromUri(MODELS_URL),
       ]);
@@ -156,18 +191,31 @@ export default function FaceScanner({ onFrameAnalysis, active = true, className 
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'user',
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 480, max: 720 },
+          },
+          audio: false,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+      }
 
       streamRef.current = stream;
+      noFaceFrameCountRef.current = 0;
+      preferTinyRef.current = false;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        void videoRef.current.play().catch(() => {
+          // Some mobile browsers delay playback until metadata is ready.
+        });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -190,8 +238,8 @@ export default function FaceScanner({ onFrameAnalysis, active = true, className 
 
     const sx = Math.max(0, Math.floor(box.x));
     const sy = Math.max(0, Math.floor(box.y));
-    const sw = Math.max(1, Math.floor(box.width));
-    const sh = Math.max(1, Math.floor(box.height));
+    const sw = Math.max(1, Math.min(Math.floor(box.width), video.videoWidth - sx));
+    const sh = Math.max(1, Math.min(Math.floor(box.height), video.videoHeight - sy));
 
     context.drawImage(video, sx, sy, sw, sh, 0, 0, 64, 64);
     const imageData = context.getImageData(0, 0, 64, 64).data;
@@ -243,15 +291,26 @@ export default function FaceScanner({ onFrameAnalysis, active = true, className 
       return;
     }
 
-    const displaySize = { width: canvas.width, height: canvas.height };
-    faceapi.matchDimensions(canvas, displaySize);
+    const primaryDetector = preferTinyRef.current
+      ? faceapi.detectSingleFace(video, TINY_OPTIONS)
+      : faceapi.detectSingleFace(video, SSD_OPTIONS);
+    let detection = await primaryDetector.withFaceLandmarks().withFaceDescriptor();
 
-    const detection = await faceapi
-      .detectSingleFace(video, SSD_OPTIONS)
-      .withFaceLandmarks()
-      .withFaceDescriptor();
+    if (!detection && !preferTinyRef.current) {
+      detection = await faceapi
+        .detectSingleFace(video, TINY_OPTIONS)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+      if (detection) {
+        preferTinyRef.current = true;
+      }
+    }
 
     if (!detection) {
+      noFaceFrameCountRef.current += 1;
+      if (noFaceFrameCountRef.current > 12) {
+        preferTinyRef.current = true;
+      }
       drawOverlay(null, 0);
       onFrameAnalysis?.({
         hasFace: false,
@@ -260,25 +319,27 @@ export default function FaceScanner({ onFrameAnalysis, active = true, className 
       });
       return;
     }
+    noFaceFrameCountRef.current = 0;
 
-    const resized = faceapi.resizeResults(detection, displaySize);
-    const frame = getFrameRect(displaySize.width, displaySize.height);
-    const brightness = measureBrightness(video, resized.detection.box);
-    const score = Math.round(resized.detection.score * 100);
+    const renderRect = getRenderedVideoRect(video.videoWidth, video.videoHeight, canvas.width, canvas.height);
+    const mappedBox = mapBoxToCanvas(detection.detection.box, renderRect);
+    const frame = getFrameRect(canvas.width, canvas.height);
+    const brightness = measureBrightness(video, detection.detection.box);
+    const score = Math.round(detection.detection.score * 100);
 
     const quality = classifyQuality({
-      box: resized.detection.box,
+      box: mappedBox,
       frame,
-      landmarks: resized.landmarks,
+      landmarks: detection.landmarks,
       brightness,
       score,
     });
 
-    drawOverlay(resized.detection.box, quality.issues.length);
+    drawOverlay(mappedBox, quality.issues.length);
 
     onFrameAnalysis?.({
       hasFace: true,
-      descriptor: resized.descriptor,
+      descriptor: detection.descriptor,
       quality,
     });
   }, [active, drawOverlay, measureBrightness, modelsLoaded, onFrameAnalysis]);
@@ -370,7 +431,18 @@ export default function FaceScanner({ onFrameAnalysis, active = true, className 
   return (
     <div className={`relative w-full overflow-hidden rounded-2xl bg-slate-950 ${className}`}>
       <div ref={containerRef} className="relative aspect-[4/3] w-full overflow-hidden bg-black">
-        <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 h-full w-full object-contain" />
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          onLoadedMetadata={(event) => {
+            void event.currentTarget.play().catch(() => {
+              // Ignore autoplay restrictions, stream will retry on next user interaction.
+            });
+          }}
+          className="absolute inset-0 h-full w-full object-contain"
+        />
         <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
         {statusOverlay}
       </div>
