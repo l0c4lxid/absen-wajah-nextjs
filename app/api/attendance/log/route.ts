@@ -41,9 +41,20 @@ export async function POST(req: Request) {
         let minDistance = 1.0;
 
         for (const u of users) {
-          const distance = getEuclideanDistance(faceDescriptor, u.faceDescriptor);
-          if (distance < minDistance) {
-            minDistance = distance;
+          if (!u.faceDescriptors || u.faceDescriptors.length === 0) {
+            continue;
+          }
+
+          let userMinDistance = 1.0;
+          for (const storedDescriptor of u.faceDescriptors) {
+            const distance = getEuclideanDistance(faceDescriptor, storedDescriptor);
+            if (distance < userMinDistance) {
+              userMinDistance = distance;
+            }
+          }
+
+          if (userMinDistance < minDistance) {
+            minDistance = userMinDistance;
             bestMatchUser = u;
           }
         }
@@ -126,10 +137,11 @@ export async function POST(req: Request) {
       type: actionType
     });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Attendance Error:', error);
+    const message = error instanceof Error ? error.message : 'Internal Server Error';
     return NextResponse.json(
-      { error: error.message || 'Internal Server Error' },
+      { error: message },
       { status: 500 }
     );
   }

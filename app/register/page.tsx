@@ -1,10 +1,31 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
-const FaceScanner = dynamic(() => import('@/components/FaceScanner'), { ssr: false });
-import { UserPlus, User, Briefcase, Hash, Camera, Save, ArrowLeft, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
+import { ArrowLeft, Briefcase, Camera, CheckCircle2, Hash, Loader2, RefreshCw, Save, User, UserPlus } from 'lucide-react';
+import BiometricFrame, { BiometricTone } from '@/components/BiometricFrame';
+import { averageDescriptor, QualityIssue } from '@/lib/biometric';
+import type { FrameAnalysis } from '@/components/FaceScanner';
+
+const FaceScanner = dynamic(() => import('@/components/FaceScanner'), { ssr: false });
+
+type RegisterFlow = 'initializing' | 'waiting' | 'quality-error' | 'modeling' | 'finalized';
+type AlertType = 'success' | 'error' | 'warning';
+
+const REQUIRED_SAMPLES = 8;
+const REQUIRED_DURATION_MS = 2200;
+const SAMPLE_INTERVAL_MS = 280;
+
+const ISSUE_MESSAGES: Record<QualityIssue, string> = {
+  'no-face': 'Posisikan wajah Anda di dalam kotak.',
+  'outside-frame': 'Wajah harus sepenuhnya berada di dalam kotak.',
+  'too-dark': 'Terlalu gelap. Tambahkan pencahayaan.',
+  'too-bright': 'Terlalu terang. Kurangi cahaya langsung.',
+  'too-small': 'Wajah terlalu jauh. Dekatkan sedikit.',
+  'too-large': 'Wajah terlalu dekat. Mundur sedikit.',
+  'look-straight': 'Lihat lurus ke kamera.',
+};
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -13,335 +34,291 @@ export default function RegisterPage() {
     employeeId: '',
   });
 
-  // Multi-sample capture state
-  const REQUIRED_SAMPLES = 5;
-  const [samples, setSamples] = useState<Float32Array[]>([]);
+  const [flow, setFlow] = useState<RegisterFlow>('initializing');
+  const [prompt, setPrompt] = useState('Menyiapkan kamera biometrik...');
+  const [progress, setProgress] = useState(0);
+  const [samplesCount, setSamplesCount] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [isChecking, setIsChecking] = useState(false);
-  const [message, setMessage] = useState<{ text: string, type: 'success' | 'error' | 'warning' } | null>(null);
-  
-  // Use refs to track latest state inside the callback without dependencies issues
-  const samplesRef = useRef<Float32Array[]>([]);
-  const isCheckingRef = useRef(false);
+  const [alert, setAlert] = useState<{ text: string; type: AlertType } | null>(null);
 
-  // Sync ref with state
-  useEffect(() => {
-    samplesRef.current = samples;
-  }, [samples]);
+  const flowRef = useRef<RegisterFlow>('initializing');
+  const sampleCollectionRef = useRef<Float32Array[]>([]);
+  const averagedDescriptorRef = useRef<Float32Array | null>(null);
+  const modelingStartedRef = useRef<number | null>(null);
+  const lastSampleAtRef = useRef(0);
 
-  useEffect(() => {
-    isCheckingRef.current = isChecking;
-  }, [isChecking]);
+  const setFlowSafe = useCallback((nextFlow: RegisterFlow, message: string, nextProgress: number) => {
+    const changed = flowRef.current !== nextFlow || prompt !== message || progress !== nextProgress;
+    if (!changed) return;
 
-  const handleDetect = async (descriptor: Float32Array) => {
-    // 1. If we already have enough samples, stop.
-    if (samplesRef.current.length >= REQUIRED_SAMPLES) return;
+    flowRef.current = nextFlow;
+    setFlow(nextFlow);
+    setPrompt(message);
+    setProgress(nextProgress);
+  }, [progress, prompt]);
 
-    // 2. If valid sample count is 0, we need to do the Duplicate Check first.
-    if (samplesRef.current.length === 0) {
-        if (isCheckingRef.current) return; // Prevent double-check
-        
-        setIsChecking(true);
-        setMessage({ text: 'Verifying face uniqueness...', type: 'warning' });
+  const resetModeling = useCallback((message = 'Posisikan wajah Anda di dalam kotak.') => {
+    sampleCollectionRef.current = [];
+    averagedDescriptorRef.current = null;
+    modelingStartedRef.current = null;
+    lastSampleAtRef.current = 0;
+    setSamplesCount(0);
+    setFlowSafe('waiting', message, 0);
+  }, [setFlowSafe]);
 
-        try {
-            // Call API to check if face exists
-            const response = await fetch('/api/user/identify', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  faceDescriptor: Array.from(descriptor),
-                }),
-            });
-
-            const data = await response.json();
-
-            // If found with high confidence
-            if (response.ok && data.user && data.score > 85) {
-                setMessage({ 
-                    text: `Face already registered to ${data.user.name}. Registration blocked.`, 
-                    type: 'error' 
-                });
-                setIsChecking(false);
-                return; // Stop here
-            }
-
-            // If unique or low match, accept this as first sample
-            // Small delay to ensure user sees "Verified" state briefly? Maybe not needed.
-            setSamples([descriptor]);
-            setMessage({ text: `Identity verified. Capturing samples... 1/${REQUIRED_SAMPLES}`, type: 'warning' });
-
-        } catch (error) {
-            console.error("Uniqueness check failed", error);
-            // On error, we allow proceeding but warn? Or just proceed.
-            // Let's proceed to allow offline-ish usage if DB is flaky, 
-            // but ideally we should block. For now, assume it's OK.
-            setSamples([descriptor]);
-            setMessage({ text: `Network check optional. Capturing samples... 1/${REQUIRED_SAMPLES}`, type: 'warning' });
-        } finally {
-            setIsChecking(false);
-        }
-    } else {
-        // 3. We already have at least 1 sample, collect the rest.
-        // We can add a throttle here if needed, but FaceScanner usually runs reasonable fps.
-        
-        // Simple distance check to ensure diversity? 
-        // For now, simply collect.
-        setSamples((prev) => {
-            if (prev.length >= REQUIRED_SAMPLES) return prev;
-            const newSamples = [...prev, descriptor];
-            
-            if (newSamples.length === REQUIRED_SAMPLES) {
-                setMessage({ text: 'Face capture complete! Ready to save.', type: 'success' });
-            } else {
-                 setMessage({ text: `Capturing samples... ${newSamples.length}/${REQUIRED_SAMPLES}. Move head slightly.`, type: 'warning' });
-            }
-            return newSamples;
-        });
+  const onFrameAnalysis = useCallback((analysis: FrameAnalysis) => {
+    if (flowRef.current === 'initializing') {
+      setFlowSafe('waiting', 'Posisikan wajah Anda di dalam kotak.', 0);
     }
-  };
 
-  const handleReset = () => {
-      setSamples([]);
-      setMessage(null);
-      setIsChecking(false);
-  };
+    if (flowRef.current === 'finalized') {
+      return;
+    }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (samples.length < REQUIRED_SAMPLES) {
-      setMessage({ text: `Please capture all ${REQUIRED_SAMPLES} samples.`, type: 'error' });
+    if (!analysis.hasFace || !analysis.descriptor) {
+      resetModeling('Posisikan wajah Anda di dalam kotak.');
+      return;
+    }
+
+    const issue = analysis.quality.issues.find((item) => item !== 'no-face');
+    if (issue) {
+      sampleCollectionRef.current = [];
+      averagedDescriptorRef.current = null;
+      modelingStartedRef.current = null;
+      lastSampleAtRef.current = 0;
+      setSamplesCount(0);
+      setFlowSafe('quality-error', ISSUE_MESSAGES[issue], 0);
+      return;
+    }
+
+    const now = Date.now();
+    if (!modelingStartedRef.current) {
+      modelingStartedRef.current = now;
+      setFlowSafe('modeling', 'Tahan posisi, sedang memproses...', 5);
+    }
+
+    if (now - lastSampleAtRef.current < SAMPLE_INTERVAL_MS) {
+      return;
+    }
+
+    lastSampleAtRef.current = now;
+    sampleCollectionRef.current.push(new Float32Array(analysis.descriptor));
+    setSamplesCount(sampleCollectionRef.current.length);
+
+    const elapsed = now - (modelingStartedRef.current ?? now);
+    const sampleProgress = Math.min(1, sampleCollectionRef.current.length / REQUIRED_SAMPLES);
+    const durationProgress = Math.min(1, elapsed / REQUIRED_DURATION_MS);
+    const unifiedProgress = Math.round(Math.min(sampleProgress, durationProgress) * 100);
+
+    setProgress(unifiedProgress);
+
+    if (sampleCollectionRef.current.length >= REQUIRED_SAMPLES && elapsed >= REQUIRED_DURATION_MS) {
+      const averaged = averageDescriptor(sampleCollectionRef.current);
+      averagedDescriptorRef.current = averaged;
+      setFlowSafe('finalized', 'Wajah berhasil didaftarkan!', 100);
+      setAlert({ text: 'Model wajah siap disimpan. Lengkapi data lalu klik Register Staff.', type: 'success' });
+    }
+  }, [resetModeling, setFlowSafe]);
+
+  const handleSubmit = useCallback(async (event: React.FormEvent) => {
+    event.preventDefault();
+
+    if (flow !== 'finalized' || !averagedDescriptorRef.current) {
+      setAlert({ text: 'Selesaikan proses modeling wajah terlebih dahulu.', type: 'error' });
       return;
     }
 
     setLoading(true);
-    setMessage(null);
+    setAlert(null);
 
     try {
-      // Prepare multi-sample data
-      const faceDescriptors = samples.map(s => Array.from(s));
+      const averaged = averagedDescriptorRef.current;
+      const sampled = sampleCollectionRef.current.map((descriptor) => Array.from(descriptor));
+      const faceDescriptors = [Array.from(averaged), ...sampled];
 
       const response = await fetch('/api/user/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...formData,
-          faceDescriptors: faceDescriptors,
+          faceDescriptors,
         }),
       });
 
       const data = await response.json();
-
-      if (response.ok) {
-        setMessage({ text: 'Staff registered & model updated successfully!', type: 'success' });
-        setFormData({ name: '', role: 'Doctor', employeeId: '' });
-        setSamples([]);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      } else {
-        setMessage({ text: data.error || 'Registration failed', type: 'error' });
+      if (!response.ok) {
+        setAlert({ text: data.error ?? 'Registrasi gagal.', type: 'error' });
+        return;
       }
-    } catch (error) {
-      setMessage({ text: 'Network error occurred.', type: 'error' });
+
+      setAlert({ text: 'Wajah berhasil didaftarkan dan tersimpan di database.', type: 'success' });
+      setFormData({ name: '', role: 'Doctor', employeeId: '' });
+      resetModeling('Posisikan wajah Anda di dalam kotak.');
+      flowRef.current = 'initializing';
+      setFlow('initializing');
+      setPrompt('Menyiapkan kamera biometrik...');
+      setProgress(0);
+    } catch {
+      setAlert({ text: 'Terjadi masalah jaringan saat menyimpan.', type: 'error' });
     } finally {
       setLoading(false);
     }
-  };
+  }, [flow, formData, resetModeling]);
+
+  const frameTone: BiometricTone = useMemo(() => {
+    if (flow === 'finalized') return 'success';
+    if (flow === 'modeling') return 'warning';
+    if (flow === 'quality-error') return 'danger';
+    if (flow === 'initializing') return 'neutral';
+    return 'neutral';
+  }, [flow]);
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-12">
-      {/* Header */}
-      <div className="bg-white shadow-sm border-b sticky top-0 z-30">
-        <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
-           <div className="flex items-center space-x-3">
-              <Link href="/" className="p-2 -ml-2 rounded-full hover:bg-gray-100 transition-colors">
-                  <ArrowLeft className="w-5 h-5 text-gray-600" suppressHydrationWarning />
-              </Link>
-              <h1 className="text-lg font-bold text-gray-900 flex items-center">
-                  <UserPlus className="w-5 h-5 mr-2 text-blue-600" suppressHydrationWarning />
-                  Staff Registration
-              </h1>
-           </div>
+    <div className="min-h-screen bg-[radial-gradient(circle_at_15%_20%,#e2e8f0_0%,#f8fafc_45%,#e2e8f0_100%)] pb-10">
+      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4">
+          <div className="flex items-center gap-3">
+            <Link href="/" className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900">
+              <ArrowLeft className="h-5 w-5" suppressHydrationWarning />
+            </Link>
+            <h1 className="flex items-center text-lg font-semibold text-slate-900">
+              <UserPlus className="mr-2 h-5 w-5 text-cyan-600" suppressHydrationWarning />
+              Face Registration
+            </h1>
+          </div>
         </div>
-      </div>
+      </header>
 
-      <div className="max-w-5xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-2 gap-8">
-        
-        {/* Left Col: Camera */}
-        <div className="space-y-6">
-            <div className={`bg-white rounded-2xl shadow-sm border overflow-hidden transition-colors ${message?.type === 'error' ? 'border-red-300' : 'border-gray-200'}`}>
-                <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
-                    <h2 className="font-semibold text-gray-800 flex items-center">
-                        <Camera className="w-4 h-4 mr-2 text-gray-500" suppressHydrationWarning />
-                        Face Capture
-                    </h2>
-                    {isChecking ? (
-                         <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 animate-pulse">
-                             Checking...
-                         </span>
-                    ) : samples.length === REQUIRED_SAMPLES ? (
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                             <CheckCircle2 className="w-3 h-3 mr-1" suppressHydrationWarning />
-                             Complete
-                        </span>
-                    ) : (
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                             Sample {samples.length}/{REQUIRED_SAMPLES}
-                        </span>
-                    )}
-                </div>
-                <div className="p-4 relative">
-                    {/* Only auto-detect if we aren't full and aren't checking */}
-                    <FaceScanner onDetect={handleDetect} autoDetect={samples.length < REQUIRED_SAMPLES && !isChecking} />
-                    
-                    {/* Progress Bar Overlay */}
-                    <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-100">
-                        <div 
-                            className={`h-full transition-all duration-300 ease-out ${samples.length === REQUIRED_SAMPLES ? 'bg-green-500' : 'bg-blue-600'}`}
-                            style={{ width: `${(samples.length / REQUIRED_SAMPLES) * 100}%` }}
-                        ></div>
-                    </div>
-
-                    {/* Block overlay if error or complete */}
-                    {message?.type === 'error' && (
-                         <div className="absolute inset-0 bg-red-900/10 backdrop-blur-[1px] flex items-center justify-center rounded-b-2xl pointer-events-none"></div>
-                    )}
-                </div>
-                
-                <div className="p-4 bg-gray-50 border-t border-gray-100 flex justify-between items-center">
-                    <p className="text-xs text-gray-500">
-                        {samples.length === 0 ? "Position face in center" : "Move head slightly for better angles"}
-                    </p>
-                    <button 
-                        type="button"
-                        onClick={handleReset}
-                        className="flex items-center text-xs font-medium text-gray-600 hover:text-red-700 transition-colors"
-                    >
-                        <RefreshCw className="w-3 h-3 mr-1" suppressHydrationWarning />
-                        Reset Capture
-                    </button>
-                </div>
+      <main className="mx-auto grid max-w-6xl gap-8 px-4 py-8 lg:grid-cols-2">
+        <section className="space-y-4">
+          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-xl shadow-slate-300/30">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="flex items-center text-sm font-semibold uppercase tracking-wider text-slate-600">
+                <Camera className="mr-2 h-4 w-4 text-slate-500" suppressHydrationWarning />
+                Modeling Camera
+              </h2>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
+                Sampel {samplesCount}/{REQUIRED_SAMPLES}
+              </span>
             </div>
-        </div>
 
-        {/* Right Col: Form */}
-        <div className="space-y-6">
-             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6">
-                <h2 className="text-xl font-bold text-gray-900 mb-6">Staff Details</h2>
-                
-                <form onSubmit={handleSubmit} className="space-y-5">
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-                        <div className="relative">
-                            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                <User className="h-5 w-5 text-gray-400" suppressHydrationWarning />
-                            </div>
-                            <input
-                                type="text"
-                                required
-                                className="block w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow"
-                                placeholder="Dr. John Doe"
-                                value={formData.name}
-                                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                            />
-                        </div>
-                    </div>
+            <div className="relative overflow-hidden rounded-2xl">
+              <FaceScanner onFrameAnalysis={onFrameAnalysis} active={flow !== 'finalized'} />
+              <BiometricFrame
+                tone={frameTone}
+                message={prompt}
+                progress={flow === 'modeling' || flow === 'finalized' ? progress : 0}
+                showScanBar={flow === 'modeling'}
+                pulse={flow === 'waiting' || flow === 'initializing'}
+              />
+            </div>
 
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
-                        <div className="relative">
-                            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                <Briefcase className="h-5 w-5 text-gray-400" suppressHydrationWarning />
-                            </div>
-                            <select
-                                className="block w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow bg-white"
-                                value={formData.role}
-                                onChange={(e) => setFormData({ ...formData, role: e.target.value })}
-                            >
-                                <option value="Surgeon">Surgeon</option>
-                                <option value="Doctor">Doctor</option>
-                                <option value="Nurse">Nurse</option>
-                                <option value="Admin">Admin</option>
-                            </select>
-                        </div>
-                    </div>
+            <div className="mt-4 flex items-center justify-between text-xs text-slate-600">
+              <p>Pastikan wajah menghadap kamera dan tidak keluar kotak.</p>
+              <button
+                type="button"
+                onClick={() => resetModeling()}
+                className="inline-flex items-center rounded-lg border border-slate-200 px-3 py-1.5 font-medium text-slate-600 transition hover:border-slate-300 hover:text-slate-900"
+              >
+                <RefreshCw className="mr-1 h-3.5 w-3.5" suppressHydrationWarning />
+                Reset Modeling
+              </button>
+            </div>
+          </div>
+        </section>
 
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Employee ID</label>
-                        <div className="relative">
-                            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                <Hash className="h-5 w-5 text-gray-400" suppressHydrationWarning />
-                            </div>
-                            <input
-                                type="text"
-                                required
-                                className="block w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow"
-                                placeholder="EMP-12345"
-                                value={formData.employeeId}
-                                onChange={(e) => setFormData({ ...formData, employeeId: e.target.value })}
-                            />
-                        </div>
-                        <p className="text-xs text-gray-400 mt-2">
-                             Note: Using an existing ID will overwrite previous face data.
-                        </p>
-                    </div>
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-300/30">
+          <h2 className="mb-5 text-xl font-semibold text-slate-900">Data Staff</h2>
 
-                    <div className="pt-4">
-                        <button
-                            type="submit"
-                            disabled={loading || samples.length < REQUIRED_SAMPLES}
-                            className={`w-full flex justify-center items-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-sm font-semibold text-white transition-all
-                                ${loading || samples.length < REQUIRED_SAMPLES 
-                                    ? 'bg-gray-300 cursor-not-allowed' 
-                                    : 'bg-blue-600 hover:bg-blue-700 hover:shadow-md transform hover:-translate-y-0.5'
-                                }
-                            `}
-                        >
-                            {loading ? (
-                                <>
-                                    <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2"></span>
-                                    Saving...
-                                </>
-                            ) : (
-                                <>
-                                    <Save className="w-5 h-5 mr-2" suppressHydrationWarning />
-                                    Register Staff
-                                </>
-                            )}
-                        </button>
-                    </div>
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Nama Lengkap</label>
+              <div className="relative">
+                <User className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" suppressHydrationWarning />
+                <input
+                  type="text"
+                  required
+                  value={formData.name}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, name: e.target.value }))}
+                  className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-slate-900 outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
+                  placeholder="Dr. Aditya Ramadhan"
+                />
+              </div>
+            </div>
 
-                    {message && (
-                        <div className={`p-4 rounded-lg flex items-start space-x-3 
-                            ${message.type === 'success' ? 'bg-green-50 text-green-800' : 
-                              message.type === 'error' ? 'bg-red-50 text-red-800' : 'bg-blue-50 text-blue-800'
-                            }`}>
-                            
-                            {message.type === 'success' ? (
-                                <CheckCircle2 className="w-5 h-5 mt-0.5 flex-shrink-0" suppressHydrationWarning />
-                            ) : message.type === 'error' ? (
-                                <AlertTriangle className="w-5 h-5 mt-0.5 flex-shrink-0" suppressHydrationWarning />
-                            ) : (
-                                <Camera className="w-5 h-5 mt-0.5 flex-shrink-0" suppressHydrationWarning />
-                            )}
-                            
-                            <span className="text-sm font-medium leading-tight pt-0.5">{message.text}</span>
-                            
-                            {message.type === 'error' && (
-                                <button 
-                                    type="button" 
-                                    onClick={handleReset}
-                                    className="ml-auto text-xs underline hover:text-red-900 whitespace-nowrap"
-                                >
-                                    Try Again
-                                </button>
-                            )}
-                        </div>
-                    )}
-                </form>
-             </div>
-        </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Role</label>
+              <div className="relative">
+                <Briefcase className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" suppressHydrationWarning />
+                <select
+                  value={formData.role}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, role: e.target.value }))}
+                  className="w-full rounded-xl border border-slate-300 bg-white py-2.5 pl-10 pr-3 text-slate-900 outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
+                >
+                  <option value="Surgeon">Surgeon</option>
+                  <option value="Doctor">Doctor</option>
+                  <option value="Nurse">Nurse</option>
+                  <option value="Admin">Admin</option>
+                </select>
+              </div>
+            </div>
 
-      </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Employee ID</label>
+              <div className="relative">
+                <Hash className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" suppressHydrationWarning />
+                <input
+                  type="text"
+                  required
+                  value={formData.employeeId}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, employeeId: e.target.value }))}
+                  className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-slate-900 outline-none transition focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
+                  placeholder="EMP-0042"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading || flow !== 'finalized'}
+              className={`flex w-full items-center justify-center rounded-xl px-4 py-3 text-sm font-semibold text-white transition ${
+                loading || flow !== 'finalized'
+                  ? 'cursor-not-allowed bg-slate-300'
+                  : 'bg-cyan-600 shadow-lg shadow-cyan-600/25 hover:bg-cyan-700'
+              }`}
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="mr-2 h-5 w-5 animate-spin" suppressHydrationWarning />
+                  Menyimpan...
+                </>
+              ) : (
+                <>
+                  <Save className="mr-2 h-5 w-5" suppressHydrationWarning />
+                  Register Staff
+                </>
+              )}
+            </button>
+          </form>
+
+          {alert && (
+            <div
+              className={`mt-5 rounded-xl border px-4 py-3 text-sm font-medium ${
+                alert.type === 'success'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : alert.type === 'error'
+                    ? 'border-rose-200 bg-rose-50 text-rose-700'
+                    : 'border-amber-200 bg-amber-50 text-amber-700'
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                {alert.type === 'success' && <CheckCircle2 className="mt-0.5 h-4 w-4" suppressHydrationWarning />}
+                <p>{alert.text}</p>
+              </div>
+            </div>
+          )}
+        </section>
+      </main>
     </div>
   );
 }
