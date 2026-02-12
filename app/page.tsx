@@ -7,15 +7,25 @@ import { Camera, UserPlus, Database, ScanFace, FileText } from 'lucide-react';
 async function getDbStatus() {
   try {
     await dbConnect();
-    return mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected';
-  } catch {
-    return 'Error';
+    const readyState = mongoose.connection.readyState;
+    return {
+      state: readyState === 1 ? 'Connected' : 'Disconnected',
+      error: null as string | null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown database error';
+    return {
+      state: 'Error',
+      error: message,
+    };
   }
 }
 
 export default async function Home() {
   const dbStatus = await getDbStatus();
-  const isOnline = dbStatus === 'Connected';
+  const isOnline = dbStatus.state === 'Connected';
+  const statusText = isOnline ? 'Online' : 'Offline';
+  const statusDetail = !isOnline && dbStatus.error ? dbStatus.error : null;
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
@@ -89,7 +99,7 @@ export default async function Home() {
                 <Database className="w-4 h-4" suppressHydrationWarning />
                 <span>System Status:</span>
                 <span className="flex items-center">
-                    {isOnline ? 'Online' : 'Offline'}
+                    {statusText}
                     <span className={`relative flex h-2.5 w-2.5 ml-2`}>
                       {isOnline && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>}
                       <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isOnline ? 'bg-green-500' : 'bg-red-500'}`}></span>
@@ -97,6 +107,11 @@ export default async function Home() {
                 </span>
             </div>
         </div>
+        {statusDetail && (
+          <p className="mt-3 text-center text-xs text-red-600">
+            DB error: {statusDetail}
+          </p>
+        )}
         
       </div>
     </div>

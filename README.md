@@ -1,36 +1,98 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Hospital Attendance - Face Recognition (Next.js)
 
-## Getting Started
+Aplikasi absensi rumah sakit berbasis pengenalan wajah menggunakan Next.js (App Router), MongoDB, dan `@vladmandic/face-api`.
 
-First, run the development server:
+## Fitur Utama
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- Registrasi wajah dengan **continuous modeling** (multi-frame, quality check, progress).
+- Kiosk absensi otomatis berbasis wajah.
+- Validasi konflik user saat register:
+  - `employeeId` sudah ada.
+  - Wajah mirip user lain (mencegah salah register).
+- CRUD user management (list, search, edit, delete + konfirmasi `employeeId`).
+- Dokumentasi API via Swagger UI di `/docs`.
+
+## Tech Stack
+
+- Next.js 16 (App Router)
+- React 19
+- Tailwind CSS 4
+- MongoDB + Mongoose
+- `@vladmandic/face-api`
+
+## Struktur Halaman
+
+- `/` - Landing dashboard
+- `/register` - Face registration + form staff + panel CRUD user
+- `/kiosk` - Scanner absensi
+- `/docs` - Redirect ke Swagger docs
+- `/docs/swagger` - Swagger UI (React component: `swagger-ui-react`)
+
+## Environment
+
+Buat file `.env.local`:
+
+```env
+MONGODB_URI=mongodb://127.0.0.1:27017/hospital-attendance
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Menjalankan Project
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Mode HTTPS lokal (disarankan untuk kamera mobile):
 
-## Learn More
+```bash
+npm run dev:https
+```
 
-To learn more about Next.js, take a look at the following resources:
+Akses aplikasi:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `http://localhost:3000`
+- atau `https://localhost:3000` (mode HTTPS)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## API Endpoints
 
-## Deploy on Vercel
+### User
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `POST /api/user/register` - register / overwrite user (dengan `confirmOverwrite`)
+- `POST /api/user/identify` - identifikasi wajah dari descriptor
+- `POST /api/user/validate` - validasi `employeeId` + cek konflik wajah
+- `GET /api/users` - list user (support `q`, `limit`)
+- `POST /api/users` - create user baru
+- `GET /api/users/{id}` - detail user
+- `PUT /api/users/{id}` - update user
+- `DELETE /api/users/{id}` - delete user (wajib `confirmEmployeeId`)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### Attendance
+
+- `POST /api/attendance/log` - catat check-in/check-out
+
+### System
+
+- `POST /api/reset-db` - reset data user + attendance
+- `GET /api/docs` - OpenAPI JSON spec
+
+## Swagger Docs
+
+Buka:
+
+- `http://localhost:3000/docs`
+
+`/docs` akan redirect ke `/docs/swagger`, lalu load OpenAPI dari `/api/docs`.
+
+## Script
+
+- `npm run dev` - dev server HTTP
+- `npm run dev:https` - dev server HTTPS
+- `npm run build` - build production
+- `npm run start` - run production server
+- `npm run lint` - lint
+
+## Catatan Mobile Camera
+
+Untuk browser mobile, gunakan HTTPS agar izin kamera lebih stabil.
+Jika scan macet, lakukan hard refresh tab lalu pastikan permission kamera diizinkan.
