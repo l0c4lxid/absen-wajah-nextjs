@@ -19,7 +19,6 @@ interface IdentifiedUser {
   employeeId: string;
 }
 
-const MATCH_SCORE_THRESHOLD = 65;
 const REQUIRED_STABLE_FRAMES = 3;
 
 export default function KioskPage() {
@@ -74,10 +73,14 @@ export default function KioskPage() {
 
       const identifyData = await identifyResponse.json();
 
-      if (!identifyResponse.ok || !identifyData.user || (identifyData.score ?? 0) < MATCH_SCORE_THRESHOLD) {
+      if (!identifyResponse.ok || !identifyData.user) {
         setScanState('failed');
         setMainMessage('Wajah tidak dikenali. Coba lagi.');
-        setResultSubtitle('Pastikan wajah berada di dalam frame dan menghadap kamera.');
+        if (identifyData?.nearestUser && typeof identifyData?.score === 'number') {
+          setResultSubtitle(`Kandidat terdekat: ${identifyData.nearestUser.name} (${identifyData.score}%).`);
+        } else {
+          setResultSubtitle('Pastikan wajah berada di dalam frame dan menghadap kamera.');
+        }
         scheduleReset(1200);
         return;
       }

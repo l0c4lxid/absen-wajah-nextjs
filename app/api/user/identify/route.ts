@@ -5,7 +5,7 @@ import { User } from '@/models/User';
 import { findBestFaceMatch, type FaceCandidate } from '@/lib/face-match';
 
 // Euclidean distance threshold for face matching
-const MATCH_THRESHOLD = 0.5;
+const MATCH_THRESHOLD = 0.62;
 
 export async function POST(req: Request) {
   try {
@@ -25,15 +25,25 @@ export async function POST(req: Request) {
     const match = findBestFaceMatch(faceDescriptor, users);
     const bestMatchUser = match.user;
     const minDistance = match.distance;
+    const matchScore = Math.max(0, Math.round((1 - minDistance) * 100));
 
     if (!bestMatchUser || minDistance > MATCH_THRESHOLD) {
       return NextResponse.json(
-        { error: 'User not found' },
+        {
+          error: 'User not found',
+          score: matchScore,
+          nearestUser: bestMatchUser
+            ? {
+                _id: bestMatchUser._id,
+                name: bestMatchUser.name,
+                role: bestMatchUser.role,
+                employeeId: bestMatchUser.employeeId,
+              }
+            : null,
+        },
         { status: 404 }
       );
     }
-
-    const matchScore = Math.max(0, Math.round((1 - minDistance) * 100));
 
     return NextResponse.json({
       user: bestMatchUser ? {
