@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { ArrowLeft, CheckCircle2, Clock3, ScanFace, XCircle } from 'lucide-react';
 import BiometricFrame, { BiometricTone } from '@/components/BiometricFrame';
 import type { FrameAnalysis } from '@/components/FaceScanner';
+import { averageDescriptor } from '@/lib/biometric';
 
 const FaceScanner = dynamic(() => import('@/components/FaceScanner'), { ssr: false });
 
@@ -18,7 +19,8 @@ interface IdentifiedUser {
   employeeId: string;
 }
 
-const MATCH_SCORE_THRESHOLD = 80;
+const MATCH_SCORE_THRESHOLD = 65;
+const REQUIRED_STABLE_FRAMES = 3;
 
 export default function KioskPage() {
   const [scanState, setScanState] = useState<ScanState>('passive');
@@ -29,6 +31,7 @@ export default function KioskPage() {
 
   const isProcessingRef = useRef(false);
   const resetTimerRef = useRef<number | null>(null);
+  const stableDescriptorsRef = useRef<Float32Array[]>([]);
 
   const scheduleReset = useCallback((delayMs: number) => {
     if (resetTimerRef.current !== null) {
@@ -40,6 +43,7 @@ export default function KioskPage() {
       setMainMessage('Silakan berdiri di depan kamera untuk absen.');
       setResultSubtitle('');
       setIdentifiedUser(null);
+      stableDescriptorsRef.current = [];
       isProcessingRef.current = false;
       setClockLabel(new Date().toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' }));
     }, delayMs);
@@ -111,6 +115,7 @@ export default function KioskPage() {
     if (scanState === 'matched' || scanState === 'failed') return;
 
     if (!analysis.hasFace || !analysis.descriptor) {
+      stableDescriptorsRef.current = [];
       if (!isProcessingRef.current) {
         setScanState('passive');
         setMainMessage('Silakan berdiri di depan kamera untuk absen.');
@@ -119,8 +124,9 @@ export default function KioskPage() {
       return;
     }
 
-    const hasIssue = analysis.quality.issues.some((item) => item === 'outside-frame' || item === 'too-small' || item === 'too-large' || item === 'look-straight');
+    const hasIssue = analysis.quality.issues.some((item) => item === 'outside-frame' || item === 'too-small' || item === 'too-large');
     if (hasIssue) {
+      stableDescriptorsRef.current = [];
       if (!isProcessingRef.current) {
         setScanState('passive');
         setMainMessage('Posisikan wajah tepat di dalam frame.');
@@ -129,7 +135,23 @@ export default function KioskPage() {
       return;
     }
 
-    void triggerRecognition(analysis.descriptor);
+    stableDescriptorsRef.current.push(new Float32Array(analysis.descriptor));
+    if (stableDescriptorsRef.current.length > REQUIRED_STABLE_FRAMES) {
+      stableDescriptorsRef.current.shift();
+    }
+
+    if (stableDescriptorsRef.current.length < REQUIRED_STABLE_FRAMES) {
+      if (!isProcessingRef.current) {
+        setScanState('analyzing');
+        setMainMessage('Menstabilkan wajah...');
+        setResultSubtitle('Tahan posisi sebentar.');
+      }
+      return;
+    }
+
+    const stabilizedDescriptor = averageDescriptor(stableDescriptorsRef.current);
+    stableDescriptorsRef.current = [];
+    void triggerRecognition(stabilizedDescriptor);
   }, [scanState, triggerRecognition]);
 
   const tone: BiometricTone = useMemo(() => {
