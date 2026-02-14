@@ -281,6 +281,43 @@ export async function GET(req: Request) {
         },
       },
       '/api/attendance/log': {
+        get: {
+          tags: ['Attendance'],
+          summary: 'Ambil riwayat log attendance',
+          parameters: [
+            {
+              name: 'userId',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+              description: 'Filter berdasarkan user id.',
+            },
+            {
+              name: 'dateFrom',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Filter tanggal mulai (ISO).',
+            },
+            {
+              name: 'dateTo',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Filter tanggal akhir (ISO).',
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              required: false,
+              schema: { type: 'integer', default: 50 },
+              description: 'Maksimal data yang dikembalikan.',
+            },
+          ],
+          responses: {
+            200: { description: 'Attendance logs fetched.' },
+          },
+        },
         post: {
           tags: ['Attendance'],
           summary: 'Catat absensi (manual atau auto)',

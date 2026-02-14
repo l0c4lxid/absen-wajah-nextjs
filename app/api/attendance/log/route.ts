@@ -8,6 +8,74 @@ import { Attendance } from '@/models/Attendance';
 // 0.6 is a common threshold for dlib/face-api
 const MATCH_THRESHOLD = 0.5;
 
+export async function GET(req: Request) {
+  try {
+    await dbConnect();
+    const { searchParams } = new URL(req.url);
+    const userId = searchParams.get('userId');
+    const dateFrom = searchParams.get('dateFrom');
+    const dateTo = searchParams.get('dateTo');
+    const limitRaw = Number(searchParams.get('limit') ?? 50);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 300) : 50;
+
+    const query: {
+      user?: string;
+      date?: { $gte?: Date; $lte?: Date };
+    } = {};
+
+    if (userId) {
+      query.user = userId;
+    }
+
+    if (dateFrom || dateTo) {
+      query.date = {};
+      if (dateFrom) {
+        const from = new Date(dateFrom);
+        if (!Number.isNaN(from.getTime())) {
+          query.date.$gte = from;
+        }
+      }
+      if (dateTo) {
+        const to = new Date(dateTo);
+        if (!Number.isNaN(to.getTime())) {
+          query.date.$lte = to;
+        }
+      }
+    }
+
+    const logs = await Attendance.find(query)
+      .sort({ date: -1, checkIn: -1 })
+      .limit(limit)
+      .populate('user', 'name role employeeId')
+      .lean();
+
+    const result = logs.map((log) => {
+      const populatedUser = log.user as unknown as { _id?: unknown; name?: string; role?: string; employeeId?: string } | undefined;
+      return {
+        _id: String(log._id),
+        user: populatedUser
+          ? {
+              _id: populatedUser._id ? String(populatedUser._id) : '',
+              name: populatedUser.name ?? '',
+              role: populatedUser.role ?? '',
+              employeeId: populatedUser.employeeId ?? '',
+            }
+          : null,
+        date: log.date,
+        checkIn: log.checkIn,
+        checkOut: log.checkOut ?? null,
+        status: log.status,
+        method: log.method,
+      };
+    });
+
+    return NextResponse.json({ logs: result, total: result.length });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Internal Server Error';
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
 function getEuclideanDistance(descriptor1: number[], descriptor2: number[]): number {
   if (descriptor1.length !== descriptor2.length) return 1.0;
   
