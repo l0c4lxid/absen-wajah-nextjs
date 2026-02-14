@@ -2,9 +2,8 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/db';
 import { User } from '@/models/User';
-import { averageDescriptor, findBestFaceMatch, type FaceCandidate } from '@/lib/face-match';
+import { detectFaceConflict, type FaceCandidate } from '@/lib/face-match';
 
-const FACE_CONFLICT_THRESHOLD = 0.45;
 const VALID_ROLES = new Set(['Surgeon', 'Doctor', 'Nurse', 'Admin']);
 
 interface RegisterBody {
@@ -42,7 +41,6 @@ export async function POST(req: Request) {
     }
 
     const normalizedEmployeeId = employeeId.trim().toUpperCase();
-    const incomingDescriptor = averageDescriptor(faceDescriptors);
     const existingUser = await User.findOne({ employeeId: normalizedEmployeeId });
 
     const otherUsers = await User.find(
@@ -53,8 +51,13 @@ export async function POST(req: Request) {
       .select('_id employeeId name role faceDescriptors')
       .lean<FaceCandidate[]>();
 
-    const faceConflict = findBestFaceMatch(incomingDescriptor, otherUsers);
-    if (faceConflict.user && faceConflict.distance <= FACE_CONFLICT_THRESHOLD) {
+    const faceConflict = detectFaceConflict(faceDescriptors, otherUsers, {
+      strictThreshold: 0.38,
+      supportThreshold: 0.42,
+      minSupportHits: Math.min(3, Math.max(2, Math.floor(faceDescriptors.length / 3))),
+    });
+
+    if (faceConflict.user) {
       return NextResponse.json(
         {
           error: 'Face descriptor is already associated with another user',
@@ -65,7 +68,8 @@ export async function POST(req: Request) {
             name: faceConflict.user.name,
             role: faceConflict.user.role,
           },
-          score: Math.max(0, Math.round((1 - faceConflict.distance) * 100)),
+          score: faceConflict.score,
+          supportHits: faceConflict.supportHits,
         },
         { status: 409 }
       );

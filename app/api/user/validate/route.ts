@@ -1,9 +1,7 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/db';
 import { User } from '@/models/User';
-import { findBestFaceMatch, type FaceCandidate } from '@/lib/face-match';
-
-const FACE_CONFLICT_THRESHOLD = 0.45;
+import { detectFaceConflict, type FaceCandidate } from '@/lib/face-match';
 
 interface ValidateBody {
   employeeId?: string;
@@ -34,8 +32,12 @@ export async function POST(req: Request) {
         .select('_id name role employeeId faceDescriptors')
         .lean<FaceCandidate[]>();
 
-      const match = findBestFaceMatch(body.faceDescriptor, users);
-      if (match.user && match.distance <= FACE_CONFLICT_THRESHOLD) {
+      const match = detectFaceConflict([body.faceDescriptor], users, {
+        strictThreshold: 0.36,
+        supportThreshold: 0.4,
+        minSupportHits: 1,
+      });
+      if (match.user) {
         faceConflict = {
           user: {
             _id: match.user._id,
@@ -43,7 +45,7 @@ export async function POST(req: Request) {
             role: match.user.role,
             employeeId: match.user.employeeId,
           },
-          score: Math.max(0, Math.round((1 - match.distance) * 100)),
+          score: match.score,
         };
       }
     }
